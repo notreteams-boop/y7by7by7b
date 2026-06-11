@@ -1857,7 +1857,7 @@
   // ⚙️  ЗАМЕНИТЕ на ваш реальный GitHub username и repo name:
   const GITHUB_USER = 'notreteams-boop';
   const GITHUB_REPO = 'y7by7by7b';
-  const PRICES_URL = `https://raw.githubusercontent.com/${GITHUB_USER}/${GITHUB_REPO}/main/prices.json`;
+  const PRICES_URL = `https://api.github.com/repos/${GITHUB_USER}/${GITHUB_REPO}/contents/prices.json`;
 
   let menuItems = DEFAULT_MENU_ITEMS;
 
@@ -1868,9 +1868,9 @@
   // Load prices.json and override prices, then init the page
   async function loadPricesAndInit() {
     try {
-      const res = await fetch(PRICES_URL + '?_=' + Date.now()); // cache-bust
-      if (res.ok) {
-        const prices = await res.json(); // { "s1": "4.50", "sh1": "11.00", ... }
+      const res = await fetch(PRICES_URL, {headers: {'Accept': 'application/vnd.github.v3.raw', 'Cache-Control': 'no-cache'}});
+if (res.ok) {
+  const prices = await res.json();
         menuItems = DEFAULT_MENU_ITEMS.map(item => ({
           ...item,
           price: prices[item.id] !== undefined ? String(prices[item.id]) : item.price
