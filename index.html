@@ -1868,9 +1868,10 @@
   // Load prices.json and override prices, then init the page
   async function loadPricesAndInit() {
     try {
-      const res = await fetch(PRICES_URL, {headers: {'Accept': 'application/vnd.github.v3.raw', 'Cache-Control': 'no-cache'}});
+      const res = await fetch(PRICES_URL, {headers: {'Accept': 'application/vnd.github.v3+json'}});
 if (res.ok) {
-  const prices = await res.json();
+  const data = await res.json();
+  const prices = JSON.parse(atob(data.content.replace(/\n/g, '')));
         menuItems = DEFAULT_MENU_ITEMS.map(item => ({
           ...item,
           price: prices[item.id] !== undefined ? String(prices[item.id]) : item.price
