@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
 Telegram bot для изменения цен на сайте Šeherezāde.
-Цены хранятся в GitHub Gist — нет кэша, обновляется мгновенно.
+Цены хранятся в prices.json в GitHub репо.
+Сайт загружает цены через jsdelivr CDN (обновляется за 1-2 мин, без кэша).
 """
 
 import os
 import json
+import base64
 import logging
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -17,7 +19,10 @@ from telegram.ext import (
 # ─── НАСТРОЙКИ — читаем из переменных окружения ───────────────────────────────
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 GITHUB_TOKEN       = os.environ["GITHUB_TOKEN"]
-GIST_ID            = os.environ["GIST_ID"]  # fa7f542720a5a6391b57399314345670
+GITHUB_USER        = os.environ["GITHUB_USER"]
+GITHUB_REPO        = os.environ["GITHUB_REPO"]
+GITHUB_BRANCH      = os.environ.get("GITHUB_BRANCH", "main")
+PRICES_FILE_PATH   = "prices.json"
 OWNER_IDS          = [int(x.strip()) for x in os.environ["OWNER_IDS"].split(",")]
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -98,31 +103,31 @@ logger = logging.getLogger(__name__)
 SELECT_CATEGORY, SELECT_ITEM, ENTER_PRICE = range(3)
 
 
-# ─── GIST API ─────────────────────────────────────────────────────────────────
+# ─── GITHUB REPO API ──────────────────────────────────────────────────────────
 
-def get_prices_from_gist():
-    """Скачать текущий prices.json из Gist."""
-    url = f"https://api.github.com/gists/{GIST_ID}"
+def get_prices():
+    url = f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}/contents/{PRICES_FILE_PATH}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
     r = requests.get(url, headers=headers, timeout=10)
     r.raise_for_status()
     data = r.json()
-    content = data["files"]["prices.json"]["content"]
-    return json.loads(content)
+    content = base64.b64decode(data["content"]).decode("utf-8")
+    return json.loads(content), data["sha"]
 
 
-def update_prices_in_gist(prices, changed_item, new_price):
-    """Обновить prices.json в Gist."""
-    url = f"https://api.github.com/gists/{GIST_ID}"
+def update_prices(prices, sha, changed_item, new_price):
+    url = f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}/contents/{PRICES_FILE_PATH}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
     content = json.dumps(prices, ensure_ascii=False, indent=2) + "\n"
+    encoded = base64.b64encode(content.encode("utf-8")).decode("utf-8")
     payload = {
-        "files": {
-            "prices.json": {"content": content}
-        }
+        "message": f"price: {changed_item} → {new_price}€",
+        "content": encoded,
+        "sha": sha,
+        "branch": GITHUB_BRANCH,
     }
-    r = requests.patch(url, headers=headers, json=payload, timeout=10)
-    return r.status_code == 200
+    r = requests.put(url, headers=headers, json=payload, timeout=10)
+    return r.status_code in (200, 201)
 
 
 # ─── HANDLERS ─────────────────────────────────────────────────────────────────
@@ -136,11 +141,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Нет доступа.")
         return
     await update.message.reply_text(
-        "👋 Привет! Я бот для управления ценами Šeherezāde.\n\n"
-        "Команды:\n"
-        "  /cena — изменить цену блюда\n"
-        "  /vse — показать все текущие цены\n"
-        "  /otmena — отменить"
+        "👋 Привет! Бот управления ценами Šeherezāde.\n\n"
+        "/cena — изменить цену\n"
+        "/vse — все текущие цены\n"
+        "/otmena — отменить"
     )
 
 
@@ -149,11 +153,11 @@ async def show_all_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Нет доступа.")
         return
     try:
-        prices = get_prices_from_gist()
+        prices, _ = get_prices()
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка при загрузке цен: {e}")
+        await update.message.reply_text(f"❌ Ошибка: {e}")
         return
-    lines = ["📋 *Текущие цены на сайте:*\n"]
+    lines = ["📋 *Текущие цены:*\n"]
     for cat, ids in CATEGORIES.items():
         lines.append(f"\n*{cat}*")
         for item_id in ids:
@@ -183,7 +187,7 @@ async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["category"] = cat
     items = CATEGORIES.get(cat, [])
     try:
-        prices = get_prices_from_gist()
+        prices, _ = get_prices()
     except Exception:
         prices = {}
     keyboard = []
@@ -216,7 +220,7 @@ async def select_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["item_id"] = item_id
     name = ITEM_NAMES.get(item_id, item_id)
     try:
-        prices = get_prices_from_gist()
+        prices, _ = get_prices()
         current = prices.get(item_id, "?")
     except Exception:
         current = "?"
@@ -235,23 +239,23 @@ async def enter_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raise ValueError
         new_price_str = f"{new_price:.2f}"
     except ValueError:
-        await update.message.reply_text("❌ Неверный формат. Введите число, например `12.50`:", parse_mode="Markdown")
+        await update.message.reply_text("❌ Введите число, например `12.50`:", parse_mode="Markdown")
         return ENTER_PRICE
     item_id = context.user_data.get("item_id")
     name = ITEM_NAMES.get(item_id, item_id)
-    await update.message.reply_text("⏳ Обновляю цену на сайте...")
+    await update.message.reply_text("⏳ Обновляю...")
     try:
-        prices = get_prices_from_gist()
+        prices, sha = get_prices()
         old_price = prices.get(item_id, "?")
         prices[item_id] = new_price_str
-        success = update_prices_in_gist(prices, item_id, new_price_str)
+        success = update_prices(prices, sha, item_id, new_price_str)
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка Gist API: {e}")
+        await update.message.reply_text(f"❌ Ошибка: {e}")
         return ConversationHandler.END
     if success:
         await update.message.reply_text(
-            f"✅ Цена обновлена!\n\n🍽️ *{name}*\n  Было: {old_price} €\n  Стало: *{new_price_str} €*\n\n"
-            f"Сайт обновится мгновенно!\nИспользуй /cena для следующего изменения.",
+            f"✅ Готово!\n\n🍽️ *{name}*\n  Было: {old_price} €\n  Стало: *{new_price_str} €*\n\n"
+            f"Сайт обновится через 1-2 мин.",
             parse_mode="Markdown"
         )
     else:
@@ -263,8 +267,6 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Отменено.")
     return ConversationHandler.END
 
-
-# ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
