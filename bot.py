@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
-Telegram bot для изменения цен на сайте Šeherezāde (GitHub Pages).
-Токены читаются из переменных окружения — безопасно для Railway/любого сервера.
+Telegram bot для изменения цен на сайте Šeherezāde.
+Цены хранятся в GitHub Gist — нет кэша, обновляется мгновенно.
 """
 
 import os
 import json
-import base64
 import logging
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -18,13 +17,8 @@ from telegram.ext import (
 # ─── НАСТРОЙКИ — читаем из переменных окружения ───────────────────────────────
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 GITHUB_TOKEN       = os.environ["GITHUB_TOKEN"]
-GITHUB_USER        = os.environ["GITHUB_USER"]
-GITHUB_REPO        = os.environ["GITHUB_REPO"]
-GITHUB_BRANCH      = os.environ.get("GITHUB_BRANCH", "main")
-PRICES_FILE_PATH   = os.environ.get("PRICES_FILE_PATH", "prices.json")
-
-# OWNER_IDS — через запятую, например: "123456789,987654321"
-OWNER_IDS = [int(x.strip()) for x in os.environ["OWNER_IDS"].split(",")]
+GIST_ID            = os.environ["GIST_ID"]  # fa7f542720a5a6391b57399314345670
+OWNER_IDS          = [int(x.strip()) for x in os.environ["OWNER_IDS"].split(",")]
 # ──────────────────────────────────────────────────────────────────────────────
 
 ITEM_NAMES = {
@@ -104,31 +98,31 @@ logger = logging.getLogger(__name__)
 SELECT_CATEGORY, SELECT_ITEM, ENTER_PRICE = range(3)
 
 
-# ─── GITHUB API ───────────────────────────────────────────────────────────────
+# ─── GIST API ─────────────────────────────────────────────────────────────────
 
-def get_prices_from_github():
-    url = f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}/contents/{PRICES_FILE_PATH}"
+def get_prices_from_gist():
+    """Скачать текущий prices.json из Gist."""
+    url = f"https://api.github.com/gists/{GIST_ID}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
     r = requests.get(url, headers=headers, timeout=10)
     r.raise_for_status()
     data = r.json()
-    content = base64.b64decode(data["content"]).decode("utf-8")
-    return json.loads(content), data["sha"]
+    content = data["files"]["prices.json"]["content"]
+    return json.loads(content)
 
 
-def update_prices_on_github(prices, sha, changed_item, new_price):
-    url = f"https://api.github.com/repos/{GITHUB_USER}/{GITHUB_REPO}/contents/{PRICES_FILE_PATH}"
+def update_prices_in_gist(prices, changed_item, new_price):
+    """Обновить prices.json в Gist."""
+    url = f"https://api.github.com/gists/{GIST_ID}"
     headers = {"Authorization": f"token {GITHUB_TOKEN}", "Accept": "application/vnd.github.v3+json"}
     content = json.dumps(prices, ensure_ascii=False, indent=2) + "\n"
-    encoded = base64.b64encode(content.encode("utf-8")).decode("utf-8")
     payload = {
-        "message": f"price update: {changed_item} → {new_price}€  ({ITEM_NAMES.get(changed_item, changed_item)})",
-        "content": encoded,
-        "sha": sha,
-        "branch": GITHUB_BRANCH,
+        "files": {
+            "prices.json": {"content": content}
+        }
     }
-    r = requests.put(url, headers=headers, json=payload, timeout=10)
-    return r.status_code in (200, 201)
+    r = requests.patch(url, headers=headers, json=payload, timeout=10)
+    return r.status_code == 200
 
 
 # ─── HANDLERS ─────────────────────────────────────────────────────────────────
@@ -155,7 +149,7 @@ async def show_all_prices(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⛔ Нет доступа.")
         return
     try:
-        prices, _ = get_prices_from_github()
+        prices = get_prices_from_gist()
     except Exception as e:
         await update.message.reply_text(f"❌ Ошибка при загрузке цен: {e}")
         return
@@ -189,7 +183,7 @@ async def select_category(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["category"] = cat
     items = CATEGORIES.get(cat, [])
     try:
-        prices, _ = get_prices_from_github()
+        prices = get_prices_from_gist()
     except Exception:
         prices = {}
     keyboard = []
@@ -222,7 +216,7 @@ async def select_item(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["item_id"] = item_id
     name = ITEM_NAMES.get(item_id, item_id)
     try:
-        prices, _ = get_prices_from_github()
+        prices = get_prices_from_gist()
         current = prices.get(item_id, "?")
     except Exception:
         current = "?"
@@ -247,21 +241,21 @@ async def enter_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = ITEM_NAMES.get(item_id, item_id)
     await update.message.reply_text("⏳ Обновляю цену на сайте...")
     try:
-        prices, sha = get_prices_from_github()
+        prices = get_prices_from_gist()
         old_price = prices.get(item_id, "?")
         prices[item_id] = new_price_str
-        success = update_prices_on_github(prices, sha, item_id, new_price_str)
+        success = update_prices_in_gist(prices, item_id, new_price_str)
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка GitHub API: {e}")
+        await update.message.reply_text(f"❌ Ошибка Gist API: {e}")
         return ConversationHandler.END
     if success:
         await update.message.reply_text(
             f"✅ Цена обновлена!\n\n🍽️ *{name}*\n  Было: {old_price} €\n  Стало: *{new_price_str} €*\n\n"
-            f"Сайт обновится через ~1 мин.\nИспользуй /cena для следующего изменения.",
+            f"Сайт обновится мгновенно!\nИспользуй /cena для следующего изменения.",
             parse_mode="Markdown"
         )
     else:
-        await update.message.reply_text("❌ Не удалось обновить. Проверь GITHUB_TOKEN и права на репо.")
+        await update.message.reply_text("❌ Не удалось обновить. Проверь GITHUB_TOKEN.")
     return ConversationHandler.END
 
 
